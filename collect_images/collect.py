@@ -21,24 +21,24 @@ def download_data(repo_id="Neatherblok/SnowySidewalkDetection-SyntheticEval",
     folders = {
         "DALL-E3": None,
         "Grok2": None,
-        "Imagen3": None,
         "RealWorld": None
     }
 
-    for folder in os.listdir(data_path):
-        folder_path = os.path.join(data_path, folder)
+    for folder in os.listdir(f'{data_path}/train'):
+        folder_path = os.path.join(data_path, 'train', folder)
         if os.path.isdir(folder_path):
             if folder in folders:
                 folders[folder] = folder_path
 
-    return folders
+    # Return the base path and folders
+    return data_path, folders
 
 if __name__ == "__main__":
     # Ensure the directory for downloaded data exists
     os.makedirs("./data/synthetic_eval", exist_ok=True)
 
     # Download the dataset
-    folders = download_data()
+    data_path, folders = download_data()
 
     # Print the location of the dataset folders
     print("Dataset Folders:")
