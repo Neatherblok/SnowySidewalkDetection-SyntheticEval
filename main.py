@@ -249,7 +249,7 @@ if __name__ == "__main__":
 
         # Evaluate the model across multiple runs
         f2_scores, confusion_matrices, avg_f2_score = evaluate_model_multiple_runs(
-            model, dataloader_func, device, num_runs=10
+            model, dataloader_func, device, num_runs=12
         )
 
         # Print summary for this model
