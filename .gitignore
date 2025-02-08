@@ -172,6 +172,3 @@ cython_debug/
 
 # HuggingFace Files
 data
-
-# Model files
-trained_models/
