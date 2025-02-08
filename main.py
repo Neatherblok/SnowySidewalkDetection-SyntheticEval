@@ -8,6 +8,7 @@ from sklearn.metrics import fbeta_score, confusion_matrix
 from collect_images.collect import download_data
 from evaluation.confusion_matrices import plot_confusion_matrix
 import matplotlib.pyplot as plt
+import argparse  # Add this import at the top
 
 ############################
 # Example Utility Functions
@@ -130,31 +131,38 @@ def train_model(model, dataloader, criterion, optimizer, device):
 # Train models on each dataset
 ##############################
 
-def train_on_synthetic_data():
+def train_on_synthetic_data(epochs=25, batch_size=4, learning_rate=0.001, verbose=False):
+    """Train models on synthetic data with configurable parameters."""
     base_data_path, data_folders = download_data()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     trained_models = {}
 
     for name, folder_path in data_folders.items():
-        print(f"\n=== Training model on {name} data ===")
+        if verbose:
+            print(f"\n=== Training model on {name} data ===")
         if not os.path.exists(folder_path):
-            print(f"Skipping {name} because folder does not exist: {folder_path}")
+            if verbose:
+                print(f"Skipping {name} because folder does not exist: {folder_path}")
             continue
 
         images, labels = load_images_with_labels(folder_path)
         transform = get_transform()
         dataset = images_to_dataset(images, labels, transform)
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=True)
+        dataloader = torch.utils.data.DataLoader(
+            dataset, 
+            batch_size=batch_size, 
+            shuffle=True
+        )
 
         model = CustomModel().to(device)
         criterion = nn.CrossEntropyLoss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
-        num_epochs = 25
-        for epoch in range(num_epochs):
+        for epoch in range(epochs):
             loss_val, acc_val = train_model(model, dataloader, criterion, optimizer, device)
-            print(f"  Epoch {epoch+1}/{num_epochs}, Loss={loss_val:.4f}, Acc={acc_val:.2f}%")
+            if verbose:
+                print(f"  Epoch {epoch+1}/{epochs}, Loss={loss_val:.4f}, Acc={acc_val:.2f}%")
 
         trained_models[name] = model
 
@@ -226,39 +234,136 @@ def evaluate_model_multiple_runs(model, dataloader_func, device, num_runs=3):
 # Putting It All Together
 ############################
 
-if __name__ == "__main__":
-    # Train and save models
-    trained_models = train_on_synthetic_data()
+def load_saved_models(model_dir):
+    """Load all saved models from the specified directory."""
+    models = {}
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    if not os.path.exists(model_dir):
+        raise FileNotFoundError(f"Model directory {model_dir} does not exist")
+    
+    for filename in os.listdir(model_dir):
+        if filename.endswith("_model.pth"):
+            model_name = filename.replace("_model.pth", "")
+            model = CustomModel().to(device)
+            model.load_state_dict(torch.load(os.path.join(model_dir, filename)))
+            model.eval()
+            models[model_name] = model
+    
+    return models
 
-    # Folder to save models
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description='Snow Detection Model Training/Evaluation',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  Train new models:
+    python main.py train
+  Evaluate existing models:
+    python main.py eval
+  Train and evaluate:
+    python main.py train eval
+  Evaluate specific models:
+    python main.py eval --models model1 model2
+  Train with custom parameters:
+    python main.py train --epochs 50 --batch-size 8 --learning-rate 0.0001
+"""
+    )
+
+    subparsers = parser.add_subparsers(dest='command', help='Commands')
+
+    # Train command
+    train_parser = subparsers.add_parser('train', help='Train new models')
+    train_parser.add_argument('--epochs', type=int, default=25, help='Number of epochs (default: 25)')
+    train_parser.add_argument('--batch-size', type=int, default=4, help='Batch size (default: 4)')
+    train_parser.add_argument('--learning-rate', type=float, default=0.001, help='Learning rate (default: 0.001)')
+    train_parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
+
+    # Eval command
+    eval_parser = subparsers.add_parser('eval', help='Evaluate existing models')
+    eval_parser.add_argument('--models', nargs='+', help='Specific models to evaluate (default: all)')
+    eval_parser.add_argument('--runs', type=int, default=12, help='Number of evaluation runs (default: 12)')
+    eval_parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
+
+    args = parser.parse_args()
+
+    # If no command provided, show help
+    if not args.command:
+        parser.print_help()
+        exit(0)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_save_dir = "./trained_models"
     os.makedirs(model_save_dir, exist_ok=True)
+    models = {}
 
-    # Evaluate each model
-    for model_name, model in trained_models.items():
-        print(f"\n=== Evaluating {model_name} model ===")
+    # Training phase
+    if 'train' in args.command:
+        if args.verbose:
+            print(f"=== Training new models with parameters ===")
+            print(f"Epochs: {args.epochs}")
+            print(f"Batch size: {args.batch_size}")
+            print(f"Learning rate: {args.learning_rate}")
+            print(f"Device: {device}")
         
-        # Save the model
-        model_path = os.path.join(model_save_dir, f"{model_name}_model.pth")
-        torch.save(model.state_dict(), model_path)
-        print(f"  Model saved to {model_path}")
-
-        # Define dataloader creation function for combined dataset
-        dataloader_func = load_combined_dataset
-
-        # Evaluate the model across multiple runs
-        f2_scores, confusion_matrices, avg_f2_score = evaluate_model_multiple_runs(
-            model, dataloader_func, device, num_runs=12
+        trained_models = train_on_synthetic_data(
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            learning_rate=args.learning_rate,
+            verbose=args.verbose
         )
+        
+        # Save the trained models
+        for model_name, model in trained_models.items():
+            model_path = os.path.join(model_save_dir, f"{model_name}_model.pth")
+            torch.save(model.state_dict(), model_path)
+            if args.verbose:
+                print(f"Saved model to {model_path}")
+            models[model_name] = model
 
-        # Print summary for this model
-        print(f"  {model_name} Results:")
-        print(f"    F2 Scores: {f2_scores}")
-        print(f"    Average F2 Score: {avg_f2_score:.4f}")
-        print(f"    Confusion Matrices:")
-        for idx, conf_mat in enumerate(confusion_matrices, 1):
-            print(f"      Run {idx}:\n{conf_mat}")
-            plot_confusion_matrix(conf_mat, f"{model_name} - Run {idx}")
+    # Evaluation phase
+    if 'eval' in args.command:
+        if args.verbose:
+            print("\n=== Loading pre-trained models for evaluation ===")
+            print(f"Number of evaluation runs: {args.runs}")
+        
+        try:
+            loaded_models = load_saved_models(model_save_dir)
+            if not loaded_models:
+                print("No pre-trained models found in ./trained_models directory")
+                if 'train' not in args.command:
+                    exit(1)
+                    
+            # Filter models if specific ones are requested
+            if args.models:
+                loaded_models = {k: v for k, v in loaded_models.items() if k in args.models}
+                if not loaded_models:
+                    print(f"None of the specified models were found: {args.models}")
+                    exit(1)
+                    
+            models.update(loaded_models)
+        except FileNotFoundError as e:
+            print(f"Error: {e}")
+            if 'train' not in args.command:
+                print("Please ensure you have trained models in the ./trained_models directory")
+                exit(1)
 
-    plt.show()
+    # Evaluate models
+    if models:
+        for model_name, model in models.items():
+            print(f"\n=== Evaluating {model_name} model ===")
+            dataloader_func = load_combined_dataset
+            f2_scores, confusion_matrices, avg_f2_score = evaluate_model_multiple_runs(
+                model, dataloader_func, device, num_runs=args.runs
+            )
+
+            print(f"  {model_name} Results:")
+            print(f"    F2 Scores: {f2_scores}")
+            print(f"    Average F2 Score: {avg_f2_score:.4f}")
+            print(f"    Confusion Matrices:")
+            for idx, conf_mat in enumerate(confusion_matrices, 1):
+                print(f"      Run {idx}:\n{conf_mat}")
+                plot_confusion_matrix(conf_mat, f"{model_name} - Run {idx}")
+
+        plt.show()
