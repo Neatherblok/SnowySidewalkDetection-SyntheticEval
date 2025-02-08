@@ -4,18 +4,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-# Confusion matrix data
-
-confusion_matrices = {
-
-    "Prediction 1": np.array([[54, 5], [49, 10]]),
-
-    "Prediction 2": np.array([[55, 4], [47, 12]]),
-
-    "Prediction 3": np.array([[54, 5], [48, 11]])
-
-}
-
 # Function to plot a single confusion matrix
 
 def plot_confusion_matrix(matrix, title, total=59):
@@ -50,14 +38,3 @@ def plot_confusion_matrix(matrix, title, total=59):
 
     return plt
 
-
-
-# Plot each confusion matrix with the updated scaling
-
-for title, matrix in confusion_matrices.items():
-
-    plot_confusion_matrix(matrix, title)
-
-
-
-plt.show()
