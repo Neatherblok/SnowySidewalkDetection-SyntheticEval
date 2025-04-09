@@ -4,11 +4,13 @@ import torch.nn as nn
 import numpy as np
 from torchvision import transforms
 from PIL import Image
-from sklearn.metrics import fbeta_score, confusion_matrix
+from sklearn.metrics import fbeta_score, confusion_matrix, precision_score, recall_score, accuracy_score, roc_auc_score
 from collect_images.collect import download_data
-from evaluation.confusion_matrices import plot_confusion_matrix
+from evaluation.confusion_matrices import plot_confusion_matrix, plot_confusion_matrices
 import matplotlib.pyplot as plt
 import argparse  # Add this import at the top
+import random
+from scipy import stats
 
 ############################
 # Example Utility Functions
@@ -32,7 +34,10 @@ def load_images_with_labels(folder_path):
 
     return images, labels
 
-def get_transform():
+def get_transform_with_seed(seed):
+    """Create a transform with a fixed random seed."""
+    torch.manual_seed(seed)
+    np.random.seed(seed)
     return transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.RandomRotation(90),
@@ -147,7 +152,7 @@ def train_on_synthetic_data(epochs=25, batch_size=4, learning_rate=0.001, verbos
             continue
 
         images, labels = load_images_with_labels(folder_path)
-        transform = get_transform()
+        transform = get_transform_with_seed(42)
         dataset = images_to_dataset(images, labels, transform)
         dataloader = torch.utils.data.DataLoader(
             dataset, 
@@ -184,51 +189,176 @@ def evaluate_model(model, dataloader, device):
 
     return np.array(all_outputs), np.array(all_labels)
 
-def load_combined_dataset():
-    base_data_path, _ = download_data()
+def load_combined_dataset_with_transform(transform, base_data_path=None, seed=42):
+    """Load dataset with a specific transform."""
+    if base_data_path is None:
+        base_data_path, _ = download_data()
     folder = os.path.join(base_data_path, "test")
     
     images = []
     labels = []
 
+    # Set seed for reproducibility
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    
+    # Load images in a consistent order
     for subdir, label_value in [("snow", 1), ("clear", 0)]:
         sub_path = os.path.join(folder, subdir)
         if not os.path.exists(sub_path):
             print(f'Directory does not exist: {sub_path}')
             continue
-        for fn in os.listdir(sub_path):
+        # Sort filenames to ensure consistent order
+        files = sorted(os.listdir(sub_path))
+        for fn in files:
             if fn.lower().endswith((".png", ".jpg", ".jpeg")):
                 img_path = os.path.join(sub_path, fn)
                 img = Image.open(img_path).convert("RGB")
                 images.append(img)
                 labels.append(label_value)
 
-    tfm = get_transform()
-    dataset = images_to_dataset(images, labels, tfm)
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=False)
+    dataset = images_to_dataset(images, labels, transform)
+    # Set worker seed for reproducibility
+    dataloader = torch.utils.data.DataLoader(
+        dataset, 
+        batch_size=4, 
+        shuffle=False,
+        num_workers=0,  # Disable multiprocessing for reproducibility
+        worker_init_fn=lambda worker_id: np.random.seed(seed + worker_id)
+    )
     return dataloader
 
-def evaluate_model_multiple_runs(model, dataloader_func, device, num_runs=3):
+def evaluate_model_multiple_runs(model, device, model_name, num_runs=3, base_seed=42):
     f2_scores = []
     confusion_matrices = []
+    all_metrics = []
+    
+    # Set global seeds for reproducibility
+    torch.manual_seed(base_seed)
+    np.random.seed(base_seed)
+    random.seed(base_seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
+    # Download data once
+    base_data_path, _ = download_data()
+    
+    # Create three different but reproducible dataloaders
+    dataloaders = []
+    for i in range(num_runs):
+        transform = get_transform_with_seed(base_seed + i)
+        dataloader = load_combined_dataset_with_transform(transform, base_data_path, seed=base_seed + i)
+        dataloaders.append(dataloader)
+
+    # Store all predictions and true labels for later analysis
+    all_predictions = []
+    all_true_labels = []
 
     for run in range(num_runs):
         print(f"  Run {run + 1}/{num_runs}")
-        dataloader = dataloader_func()
-        predictions, true_labels = evaluate_model(model, dataloader, device)
+        predictions, true_labels = evaluate_model(model, dataloaders[run], device)
         preds_binary = (predictions > 0.5).astype(int)
-        f2 = fbeta_score(true_labels, preds_binary, beta=2)
+        
+        # Store predictions and labels
+        all_predictions.append(predictions)
+        all_true_labels.append(true_labels)
+        
+        # Calculate all metrics
+        metrics = {
+            'F2': fbeta_score(true_labels, preds_binary, beta=2),
+            'Precision': precision_score(true_labels, preds_binary),
+            'Recall': recall_score(true_labels, preds_binary),
+            'Accuracy': accuracy_score(true_labels, preds_binary),
+            'ROC AUC': roc_auc_score(true_labels, predictions)
+        }
+        
         conf_mat = confusion_matrix(true_labels, preds_binary)
-
-        f2_scores.append(f2)
+        
+        f2_scores.append(metrics['F2'])
         confusion_matrices.append(conf_mat)
+        all_metrics.append(metrics)
 
-        print(f"    F2 score: {f2:.4f}")
+        print(f"    Metrics for Run {run + 1}:")
+        for metric_name, value in metrics.items():
+            print(f"      {metric_name}: {value:.4f}")
         print(f"    Confusion matrix:\n{conf_mat}")
 
-    avg_f2_score = np.mean(f2_scores)
-    print(f"  Average F2 score over {num_runs} runs: {avg_f2_score:.4f}")
-    return f2_scores, confusion_matrices, avg_f2_score
+    # Calculate average metrics
+    avg_metrics = {}
+    std_metrics = {}
+    for metric in ['F2', 'Precision', 'Recall', 'Accuracy', 'ROC AUC']:
+        values = [run_metrics[metric] for run_metrics in all_metrics]
+        avg_metrics[metric] = np.mean(values)
+        std_metrics[metric] = np.std(values)
+        print(f"  Average {metric}: {avg_metrics[metric]:.4f} (±{std_metrics[metric]:.4f})")
+
+    # Plot all confusion matrices in one figure
+    titles = [f"Run {i+1}" for i in range(num_runs)]
+    model_names = [model_name] * num_runs
+    plot_confusion_matrices(confusion_matrices, titles, model_names, total_samples=len(true_labels))
+    
+    return {
+        'f2_scores': f2_scores,
+        'confusion_matrices': confusion_matrices,
+        'avg_metrics': avg_metrics,
+        'std_metrics': std_metrics,
+        'all_predictions': all_predictions,
+        'all_true_labels': all_true_labels,
+        'all_metrics': all_metrics
+    }
+
+def perform_statistical_tests(model_results, reference_model='real_world'):
+    """
+    Perform statistical tests to compare synthetic models against the real-world model.
+    
+    Args:
+        model_results (dict): Dictionary containing results for each model
+        reference_model (str): Name of the reference model to compare against
+    """
+    print("\n=== Statistical Analysis ===")
+    
+    # Define metrics to test
+    metrics = ['F2', 'Precision', 'Recall', 'Accuracy', 'ROC AUC']
+    
+    # Get reference model metrics
+    ref_metrics = {metric: [] for metric in metrics}
+    for run_metrics in model_results[reference_model]['all_metrics']:
+        for metric in metrics:
+            ref_metrics[metric].append(run_metrics[metric])
+    
+    # Compare each model against reference
+    for model_name, results in model_results.items():
+        if model_name == reference_model:
+            continue
+            
+        print(f"\nComparing {model_name} vs {reference_model}:")
+        
+        for metric in metrics:
+            # Get metric values for current model
+            model_values = [run_metrics[metric] for run_metrics in results['all_metrics']]
+            
+            # Perform paired t-test
+            t_stat, p_value = stats.ttest_rel(model_values, ref_metrics[metric])
+            
+            # Calculate effect size (Cohen's d for paired samples)
+            d = np.mean(np.array(model_values) - np.array(ref_metrics[metric])) / \
+                np.std(np.array(model_values) - np.array(ref_metrics[metric]))
+            
+            print(f"\n  {metric}:")
+            print(f"    {model_name}: {np.mean(model_values):.4f} (±{np.std(model_values):.4f})")
+            print(f"    {reference_model}: {np.mean(ref_metrics[metric]):.4f} (±{np.std(ref_metrics[metric]):.4f})")
+            print(f"    p-value: {p_value:.4f}")
+            print(f"    Effect size (Cohen's d): {d:.4f}")
+            
+            # Interpret results
+            if p_value < 0.05:
+                if d > 0:
+                    print(f"    → {model_name} performs significantly BETTER than {reference_model}")
+                else:
+                    print(f"    → {model_name} performs significantly WORSE than {reference_model}")
+            else:
+                print(f"    → No significant difference between {model_name} and {reference_model}")
 
 ############################
 # Putting It All Together
@@ -351,19 +481,15 @@ Examples:
 
     # Evaluate models
     if models:
+        model_results = {}
         for model_name, model in models.items():
             print(f"\n=== Evaluating {model_name} model ===")
-            dataloader_func = load_combined_dataset
-            f2_scores, confusion_matrices, avg_f2_score = evaluate_model_multiple_runs(
-                model, dataloader_func, device, num_runs=args.runs
+            results = evaluate_model_multiple_runs(
+                model, device, model_name, num_runs=args.runs
             )
+            model_results[model_name] = results
 
-            print(f"  {model_name} Results:")
-            print(f"    F2 Scores: {f2_scores}")
-            print(f"    Average F2 Score: {avg_f2_score:.4f}")
-            print(f"    Confusion Matrices:")
-            for idx, conf_mat in enumerate(confusion_matrices, 1):
-                print(f"      Run {idx}:\n{conf_mat}")
-                plot_confusion_matrix(conf_mat, f"{model_name} - Run {idx}")
+        # Perform statistical analysis
+        perform_statistical_tests(model_results)
 
         plt.show()
